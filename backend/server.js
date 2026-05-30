@@ -71,9 +71,14 @@ app.post('/api/police/issue-fine', async (req, res) => {
             ticket_number,
             recipient_email: vehicle[0].email,
             recipient_name: vehicle[0].full_name,
+            license_plate: license_plate.toUpperCase(),
             offense_name: offense[0].offense_name,
             fine_amount: offense[0].fine_amount,
-            location
+            location,
+            violation_date,
+            violation_time,
+            officer_name,
+            incident_notes
         });
 
         res.json({ success: true, ticket_number, email_sent: emailResult.success });
@@ -114,7 +119,8 @@ app.post('/api/citizen/appeal', async (req, res) => {
 app.get('/api/police/appeals', async (req, res) => {
     try {
         const [appeals] = await db.query(`
-            SELECT a.*, tc.ticket_number, o.full_name, o.email, oc.offense_name, tc.fine_amount
+            SELECT a.*, tc.ticket_number, tc.fine_amount, tc.location, tc.violation_date,
+                   o.full_name, o.email, v.license_plate, oc.offense_name
             FROM appeals a
             JOIN traffic_citations tc ON a.citation_id = tc.citation_id
             JOIN vehicles v ON tc.vehicle_id = v.vehicle_id
@@ -133,7 +139,14 @@ app.post('/api/police/appeal/approve/:appealId', async (req, res) => {
     const { officer_response } = req.body;
     try {
         const [appeal] = await db.query(`
-            SELECT tc.citation_id, o.email, o.full_name, tc.ticket_number, oc.offense_name, tc.fine_amount
+            SELECT 
+                a.appeal_id,
+                tc.citation_id,
+                tc.ticket_number,
+                tc.fine_amount,
+                oc.offense_name,
+                o.email,
+                o.full_name
             FROM appeals a
             JOIN traffic_citations tc ON a.citation_id = tc.citation_id
             JOIN vehicles v ON tc.vehicle_id = v.vehicle_id
@@ -142,19 +155,85 @@ app.post('/api/police/appeal/approve/:appealId', async (req, res) => {
             WHERE a.appeal_id = ?
         `, [req.params.appealId]);
 
-        await db.query('UPDATE appeals SET review_status = "Approved", officer_response = ? WHERE appeal_id = ?', [officer_response, req.params.appealId]);
-        await db.query('UPDATE traffic_citations SET status = "Dismissed" WHERE citation_id = ?', [appeal[0].citation_id]);
+        if (appeal.length === 0) {
+            return res.status(404).json({ error: 'Appeal not found' });
+        }
+
+        await db.query(
+            'UPDATE appeals SET review_status = "Approved", officer_response = ? WHERE appeal_id = ?',
+            [officer_response, req.params.appealId]
+        );
+        await db.query(
+            'UPDATE traffic_citations SET status = "Dismissed" WHERE citation_id = ?',
+            [appeal[0].citation_id]
+        );
 
         await sendAppealResponseEmail({
+            appeal_id: appeal[0].appeal_id,
             recipient_email: appeal[0].email,
             recipient_name: appeal[0].full_name,
             ticket_number: appeal[0].ticket_number,
+            offense_name: appeal[0].offense_name,
+            fine_amount: appeal[0].fine_amount,
             appeal_status: 'Approved',
             officer_response
         });
 
         res.json({ success: true });
     } catch (error) {
+        console.error('Approve error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Reject appeal
+app.post('/api/police/appeal/reject/:appealId', async (req, res) => {
+    const { officer_response } = req.body;
+    try {
+        const [appeal] = await db.query(`
+            SELECT 
+                a.appeal_id,
+                tc.citation_id,
+                tc.ticket_number,
+                tc.fine_amount,
+                oc.offense_name,
+                o.email,
+                o.full_name
+            FROM appeals a
+            JOIN traffic_citations tc ON a.citation_id = tc.citation_id
+            JOIN vehicles v ON tc.vehicle_id = v.vehicle_id
+            JOIN vehicle_owners o ON v.owner_id = o.owner_id
+            JOIN offense_catalog oc ON tc.offense_id = oc.offense_id
+            WHERE a.appeal_id = ?
+        `, [req.params.appealId]);
+
+        if (appeal.length === 0) {
+            return res.status(404).json({ error: 'Appeal not found' });
+        }
+
+        await db.query(
+            'UPDATE appeals SET review_status = "Rejected", officer_response = ? WHERE appeal_id = ?',
+            [officer_response, req.params.appealId]
+        );
+        await db.query(
+            'UPDATE traffic_citations SET status = "Unpaid" WHERE citation_id = ?',
+            [appeal[0].citation_id]
+        );
+
+        await sendAppealResponseEmail({
+            appeal_id: appeal[0].appeal_id,
+            recipient_email: appeal[0].email,
+            recipient_name: appeal[0].full_name,
+            ticket_number: appeal[0].ticket_number,
+            offense_name: appeal[0].offense_name,
+            fine_amount: appeal[0].fine_amount,
+            appeal_status: 'Rejected',
+            officer_response
+        });
+
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Reject error:', error);
         res.status(500).json({ error: error.message });
     }
 });
